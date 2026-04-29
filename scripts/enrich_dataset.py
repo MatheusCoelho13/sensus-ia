@@ -2,7 +2,7 @@
 """Enriquecer dataset: detectar classes com poucas imagens, buscar URLs no Wikimedia e baixar imagens.
 
 Fluxo:
- 1. Conta imagens por classe em datasets/images/(train,val)
+ 1. Conta imagens por classe em datasets/coco/images/(train,val)
  2. Para classes com menos de --target-per-class, chama fetch_wikimedia_urls.py para obter URLs
  3. Chama download_images.py para baixar as imagens (respeitando per-class)
  4. Opcional: regenerar labels via YOLO inferência (`--regen-labels`)
@@ -13,35 +13,41 @@ Exemplo:
 import argparse
 import subprocess
 from pathlib import Path
-import shutil
 import sys
 import yaml
 
 
-def count_images(dataset_dir: Path):
+def count_images(dataset_dir: Path, class_names):
     counts = {}
     for split in ('train', 'val'):
-        base = dataset_dir / 'images' / split
+        base = dataset_dir / 'labels' / split
         if not base.exists():
             continue
-        for cls_dir in base.iterdir():
-            if not cls_dir.is_dir():
-                continue
-            cnt = sum(1 for _ in cls_dir.iterdir() if _.is_file())
-            counts[cls_dir.name] = counts.get(cls_dir.name, 0) + cnt
+        for txt_file in base.rglob('*.txt'):
+            for line in txt_file.read_text(encoding='utf-8').splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    class_id = int(line.split()[0])
+                except Exception:
+                    continue
+                if 0 <= class_id < len(class_names):
+                    class_name = class_names[class_id]
+                    counts[class_name] = counts.get(class_name, 0) + 1
     return counts
 
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--target-per-class', type=int, default=200)
+    p.add_argument('--target-per-class', type=int, default=20)
+    p.add_argument('--min-empty-class', type=int, default=4, help='Quantidade mínima para classes sem imagens')
     p.add_argument('--classes', nargs='*', help='Lista de classes a processar (por padrão pega do config/data.yaml)')
     p.add_argument('--contact', default='')
     p.add_argument('--out-urls', default='data/urls/urls_enrich.txt')
     p.add_argument('--max-per-class', type=int, default=200)
     p.add_argument('--regen-labels', action='store_true', help='Executar inferência para gerar labels txt nas novas imagens')
     p.add_argument('--model-for-labels', default='yolov8n.pt')
-    p.add_argument('--dataset', default='datasets')
+    p.add_argument('--dataset', default='datasets/coco')
     args = p.parse_args()
 
     project_root = Path(__file__).parent.parent
@@ -65,7 +71,7 @@ def main():
         else:
             classes = ['pessoa','cadeira','mesa','porta','parede']
 
-    counts = count_images(dataset_dir)
+    counts = count_images(dataset_dir, classes)
     print('Contagem atual por classe:')
     for c in classes:
         print(f' - {c}: {counts.get(c,0)}')
@@ -74,8 +80,11 @@ def main():
     to_fetch = {}
     for c in classes:
         have = counts.get(c, 0)
-        if have < args.target_per_class:
+        if have == 0:
+            need = args.min_empty_class
+        else:
             need = args.target_per_class - have
+        if need > 0:
             to_fetch[c] = min(need, args.max_per_class)
 
     if not to_fetch:
@@ -116,12 +125,11 @@ def main():
     if args.regen_labels:
         print('Regenerando labels via inferência do modelo:', args.model_for_labels)
         try:
-            from ultralytics import YOLO
-            model = YOLO(args.model_for_labels)
-            # run predict on new images (train & val)
-            src = str(dataset_dir / 'images')
-            model.predict(source=src, save_txt=True, device='cpu')
-            print('Labels regenerados (salvo em runs/predict/...). Verifique e mova para datasets/labels se necessário.')
+            subprocess.run(
+                [sys.executable, 'scripts/prepare_dataset.py', '--dataset', str(dataset_dir), '--model', args.model_for_labels],
+                check=False,
+            )
+            print('Labels regenerados dentro do próprio dataset.')
         except Exception as e:
             print('Falha ao regenerar labels:', e)
 

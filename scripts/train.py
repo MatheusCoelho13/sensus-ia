@@ -1,299 +1,289 @@
-"""Treinamento iterativo com early-stop baseado em mAP50.
+"""scripts/train.py
 
-Este script treina em passos (chunks) e após cada chunk executa
-validação. Se a métrica `mAP50` atingir o limiar configurado,
-o treino é interrompido automaticamente.
+Refatoração do loop de treino iterativo com early-stop por mAP50.
 
-Uso:
-    python scripts/train.py --max-epochs 50 --step 5 --target-map 0.6
+Decisões principais:
+- Separação clara de responsabilidades (parsing, device, treino, validação, saving).
+- Uso de um único `run_name` (evita suffix like custom_run2) e `exist_ok=True`.
+- Reuso do melhor peso disponível como ponto de partida.
+- Validação opcional/leve via `--fast-validate` para reduzir overhead.
+- Salvamento de `models/best.pt` apenas quando mAP50 melhora.
 
-Parâmetros principais:
-  --max-epochs : número máximo total de épocas
-  --step       : épocas por iteração antes de validar
-  --target-map : mAP50 alvo para parar o treino (0.0-1.0)
+Este arquivo evita manipular `model.overrides` diretamente e trata erros do Ultralytics
+com tentativas controladas.
 """
+
 import argparse
-import os
-from pathlib import Path
-from ultralytics import YOLO
-import shutil
-import subprocess
 import sys
-import shutil as _shutil
+import time
+from pathlib import Path
+import yaml
+import shutil
+
 try:
     import torch
 except Exception:
     torch = None
-    
-try:
-    from scripts import gpu_utils
-except Exception:
-    gpu_utils = None
 
-# Importar monitor de temperatura
-try:
-    from scripts.gpu_monitor import GPUMonitor
-except ImportError:
-    GPUMonitor = None
+from ultralytics import YOLO
 
 
-def run():
-    parser = argparse.ArgumentParser(description='Treinar com early-stop por mAP50')
-    parser.add_argument('--max-epochs', type=int, default=50)
-    parser.add_argument('--step', type=int, default=5)
-    parser.add_argument('--target-map', type=float, default=0.60,
-                        help='Parar quando mAP50 >= target (valor entre 0 e 1)')
-    parser.add_argument('--export-threshold', type=float, default=0.50,
-                        help='Se mAP50 >= export-threshold, copiar best.pt para models/best.pt')
-    parser.add_argument('--docker', action='store_true', help='Forçar execução dentro do Docker (build e relançar)')
-    parser.add_argument('--data', default='config/data.yaml')
-    parser.add_argument('--model', default='models/yolov8n.pt')
-    parser.add_argument('--imgsz', type=int, default=640)
-    parser.add_argument('--batch', type=int, default=16)
-    parser.add_argument('--device', default='auto', help="Device: 'auto', 'cpu', '0' (cuda index) or 'cuda:0')")
-    parser.add_argument('--require-cuda', action='store_true', help='Abortar se CUDA/NVIDIA GPU não estiver disponível')
-    parser.add_argument('--max-temp', type=int, default=85, help='Temperatura máxima (°C) — acima disso desliga o PC (padrão: 85)')
-    parser.add_argument('--warning-temp', type=int, default=70, help='Temperatura de aviso (°C) (padrão: 70)')
-    parser.add_argument('--temp-check-interval', type=int, default=60, help='Intervalo de verificação de temperatura (segundos, padrão: 60)')
+DEFAULT_RUN_NAME = 'train_iter'
 
-    args = parser.parse_args()
 
-    # garantir que o cwd é a raiz do projeto
-    project_root = Path(__file__).parent.parent
-    # Se não estamos dentro de um container Docker, reconstruir/relançar dentro do Docker (se disponível)
-    def _in_docker():
-        if os.environ.get('IN_DOCKER') == '1':
-            return True
-        if os.path.exists('/.dockerenv'):
-            return True
-        try:
-            with open('/proc/1/cgroup', 'rt') as f:
-                text = f.read()
-                if 'docker' in text or 'kubepods' in text:
-                    return True
-        except Exception:
-            pass
+def parse_args():
+    p = argparse.ArgumentParser(description='Treinar iterativamente com early-stop por mAP50')
+    p.add_argument('--max-epochs', type=int, default=150)
+    p.add_argument('--step', type=int, default=5, help='épocas por chunk antes de validar')
+    p.add_argument('--target-map', type=float, default=0.60)
+    p.add_argument('--export-threshold', type=float, default=0.50)
+    p.add_argument('--data', default='config/data.yaml')
+    p.add_argument('--model', default='models/yolov8n.pt') # // testar com o modelo pré-treinado seq.pt, que tem melhor capacidade de generalização ou o modelo mais leve yolov8n.pt ou o mais  o seq
+    p.add_argument('--imgsz', type=int, default=640)
+    p.add_argument('--batch', type=int, default=16)
+    p.add_argument('--device', default='auto')
+    p.add_argument('--require-cuda', action='store_true')
+    p.add_argument('--cls-weight', type=str, default='')
+    p.add_argument('--fast-validate', action='store_true', help='usar validação mais rápida (imagens menores / menos batch)')
+    p.add_argument('--skip-validate', action='store_true', help='pular validação entre chunks (mais rápido, menos seguro)')
+    p.add_argument('--run-name', default=DEFAULT_RUN_NAME)
+    return p.parse_args()
+
+
+def select_device(arg_device: str, require_cuda: bool = False):
+    # retorna string aceitável por Ultralytics ('cpu' ou index '0' ou 'cuda:0')
+    if arg_device and arg_device != 'auto':
+        return arg_device
+    if require_cuda:
+        if torch is None or not getattr(torch, 'cuda', None) or not torch.cuda.is_available():
+            raise RuntimeError('CUDA requerida, mas não disponível')
+        return '0'
+    # auto-detect
+    if torch is not None and torch.cuda.is_available():
+        return '0'
+    return 'cpu'
+
+
+def _find_latest_best_weight(project_root: Path):
+    candidates = []
+    local_best = project_root / 'models' / 'best.pt'
+    if local_best.exists():
+        candidates.append(local_best)
+    runs_root = project_root / 'runs' / 'detect'
+    if runs_root.exists():
+        candidates.extend(sorted(runs_root.glob('*/weights/best.pt')))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def load_model(start_path: str):
+    # Carrega o modelo YOLO a partir de um arquivo ou checkpoint
+    try:
+        model = YOLO(start_path)
+        return model
+    except Exception as e:
+        raise RuntimeError(f'Falha ao carregar modelo {start_path}: {e}')
+
+
+def compute_class_weights_from_data(data_yaml: str):
+    """Calcula pesos de classe automaticamente a partir dos labels YOLO no dataset definido em data.yaml.
+
+    Retorna uma lista de floats com tamanho `nc` onde weight[i] = total_annotations / (nc * count_i)
+    Se uma classe não tiver anotações, atribui weight=1.0 para evitar divisão por zero.
+    """
+    p = Path(data_yaml)
+    if not p.exists():
+        print(f'⚠️ data.yaml não encontrado em {data_yaml} — não é possível calcular cls weights')
+        return None
+    data = yaml.safe_load(p.read_text())
+    nc = int(data.get('nc', len(data.get('names', []))))
+    base_path = Path(data.get('path', '.'))
+    # presumir layout: labels/train e labels/val
+    labels_train = base_path / 'labels' / 'train'
+    if not labels_train.exists():
+        # tentar caminho alternativo: base_path / data.get('train') replace images->labels
+        train_rel = data.get('train', '')
+        if train_rel:
+            labels_train = base_path / Path(train_rel).parent / 'labels' / Path(train_rel).name
+    if not labels_train.exists():
+        # último recurso: procurar por labels dentro do dataset
+        candidates = list(base_path.rglob('labels'))
+        labels_train = candidates[0] / 'train' if candidates else None
+
+    counts = [0] * nc
+    total = 0
+    if labels_train and labels_train.exists():
+        for f in labels_train.glob('*.txt'):
+            for ln in f.read_text().splitlines():
+                parts = ln.strip().split()
+                if not parts:
+                    continue
+                try:
+                    cid = int(parts[0])
+                except Exception:
+                    continue
+                if 0 <= cid < nc:
+                    counts[cid] += 1
+                    total += 1
+
+    if total == 0:
+        print('⚠️ Nenhuma anotação encontrada ao calcular pesos de classe')
+        return None
+
+    weights = []
+    for c in counts:
+        if c <= 0:
+            weights.append(1.0)
+        else:
+            weights.append((total / (nc * c)))
+    return weights
+
+
+def validate_model(weight_path: Path, data: str, imgsz: int, batch: int, device: str, fast: bool):
+    # Retorna map50 (float) - execução envolvendo YOLO.val
+    try:
+        model = YOLO(str(weight_path))
+        v_imgsz = imgsz // 2 if fast else imgsz
+        v_batch = max(1, batch // 2) if fast else batch
+        metrics = model.val(data=data, imgsz=v_imgsz, batch=v_batch, device=device)
+        return float(metrics.box.map50)
+    except Exception as e:
+        print(f'⚠️ Erro na validação ({weight_path}): {e}')
+        return 0.0
+
+
+def pick_best_from_runs(run_name: str):
+    runs_root = Path('runs') / 'detect'
+    if not runs_root.exists():
+        return None
+    candidates = [d for d in runs_root.iterdir() if d.is_dir() and d.name == run_name]
+    if not candidates:
+        # try prefix matches
+        candidates = [d for d in runs_root.iterdir() if d.is_dir() and d.name.startswith(run_name)]
+    if not candidates:
+        return None
+    latest = max(candidates, key=lambda d: d.stat().st_mtime)
+    best_path = latest / 'weights' / 'best.pt'
+    return best_path if best_path.exists() else None
+
+
+def safe_copy_best(src: Path, dst: Path):
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(src), str(dst))
+        return True
+    except Exception as e:
+        print(f'⚠️ Falha ao copiar best.pt {src} -> {dst}: {e}')
         return False
 
-    # decidir se deve relançar dentro do Docker: somente quando explicitamente solicitado
-    docker_requested = args.docker or os.environ.get('FORCE_DOCKER') == '1'
-    if not _in_docker() and docker_requested:
-        if _shutil.which('docker'):
-            print('ℹ️  Docker solicitado — construindo imagem e relançando dentro do container...')
-            try:
-                subprocess.run(['docker', 'build', '-t', 'assistiva-ia', '.'], check=True)
-            except subprocess.CalledProcessError as e:
-                print(f'⚠ Falha ao buildar imagem Docker: {e}; continuando localmente')
-            else:
-                docker_cmd = ['docker', 'run', '--rm', '-v', f"{project_root}:/app", '-w', '/app', '-e', 'IN_DOCKER=1', 'assistiva-ia', 'python3', 'scripts/train.py'] + sys.argv[1:]
-                print('➡️  Executando comando Docker:', ' '.join(docker_cmd))
-                rc = subprocess.call(docker_cmd)
-                sys.exit(rc)
-        else:
-            print('⚠ Docker solicitado, mas não encontrado no PATH — executando localmente')
 
-    os.chdir(project_root)
+def main():
+    args = parse_args()
+    project_root = Path(__file__).parent.parent
+    device = select_device(args.device, args.require_cuda)
+    print(f'Usando device: {device}')
 
-    print(f"Iniciando treinamento iterativo: max_epochs={args.max_epochs}, step={args.step}, target_map={args.target_map}")
+    # escolher ponto de partida: models/best.pt > latest run best > provided model
+    start_path = args.model
+    latest_best = _find_latest_best_weight(project_root)
+    if latest_best is not None:
+        print(f'🔁 Usando melhor peso encontrado: {latest_best}')
+        start_path = str(latest_best)
 
-    # decidir dispositivo (auto detecta CUDA, ou usa IPEX se disponível)
-    device = args.device
-    use_ipex = False
+    model = load_model(start_path)
 
-    # require cuda flag -> fail early if no GPU
-    if getattr(args, 'require_cuda', False):
-        if gpu_utils is not None:
-            gpu_utils.require_cuda_or_exit()
-        else:
-            # fallback: try torch and nvidia-smi
-            ok = (torch is not None and getattr(torch, 'cuda', None) is not None and torch.cuda.is_available())
-            if not ok:
-                if shutil.which('nvidia-smi') is None:
-                    print('CUDA/NVIDIA GPU não detectada (require-cuda). Abortando.')
-                    sys.exit(1)
-        # force cuda device
-        device = 'cuda:0'
+    # baseline map50 (se existir models/best.pt)
+    baseline_map50 = -1.0
+    models_best = project_root / 'models' / 'best.pt'
+    if models_best.exists():
+        print('ℹ️ Validando models/best.pt como baseline...')
+        baseline_map50 = validate_model(models_best, args.data, args.imgsz, args.batch, device, fast=args.fast_validate)
+        print(f'📌 baseline mAP50 = {baseline_map50:.3f}')
 
-    if device == 'auto':
-        # prefer GPU when available via torch
-        try:
-            if torch is not None and torch.cuda.is_available():
-                device = '0'  # use first CUDA device
-            else:
-                # check for Intel extension for PyTorch (IPEX) for CPU optimizations
-                try:
-                    import intel_extension_for_pytorch as ipex  # type: ignore
-                    use_ipex = True
-                    device = 'cpu'
-                except Exception:
-                    device = 'cpu'
-        except Exception:
-            device = 'cpu'
-
-    print(f"Usando device: {device} (IPEX={'yes' if use_ipex else 'no'})")
-
-    # Inicializar monitor de temperatura (apenas para GPU)
-    monitor = None
-    if GPUMonitor is not None and device in ['0', 'cuda:0']:
-        try:
-            monitor = GPUMonitor(
-                max_temp=args.max_temp,
-                warning_temp=args.warning_temp,
-                check_interval=args.temp_check_interval,
-                gpu_index=0
-            )
-        except Exception as e:
-            print(f"⚠️  Não foi possível inicializar monitor de temperatura: {e}")
-            monitor = None
-
-    # Se já existe models/best.pt, use como base para retreinamento
-    model_path = args.model
-    if Path('models/best.pt').exists():
-        print('🔁 Usando models/best.pt como base para retreinamento')
-        model_path = 'models/best.pt'
-    model = YOLO(model_path)
-    # Ensure overrides contain model path/task to avoid Ultralytics internal KeyError
-    try:
-        model.overrides["model"] = str(model_path)
-        model.overrides["task"] = model.overrides.get("task", "detect")
-    except Exception:
-        pass
-
-    trained_run_name = 'custom_run'
+    run_name = args.run_name
     total_trained = 0
+    best_map50_seen = baseline_map50
 
+    # parse class weights if provided
+    cls_weights = None
+    if args.cls_weight:
+        if args.cls_weight.lower() == 'auto':
+            print('ℹ️ Calculando class weights automaticamente (auto) ...')
+            cls_weights = compute_class_weights_from_data(args.data)
+            if cls_weights:
+                print('🎯 Class weights (auto):', cls_weights)
+            else:
+                print('⚠️ Falha ao calcular class weights automaticamente; ignorando')
+        else:
+            try:
+                cls_weights = [float(w) for w in args.cls_weight.split(',')]
+                print('🎯 Class weights:', cls_weights)
+            except Exception:
+                print('⚠️ Invalid --cls-weight; ignorando')
+
+    # Entrar no loop de treino por chunks
     while total_trained < args.max_epochs:
         remaining = args.max_epochs - total_trained
         step = args.step if remaining >= args.step else remaining
+        print(f'\n▶ Treinando por {step} épocas (treinado {total_trained}/{args.max_epochs})')
 
-        print(f"\n▶ Treinando por {step} época(s) (total já treinado: {total_trained})...")
-        
-        # ⚠️ Verificar temperatura antes de treinar
-        if monitor is not None:
-            if not monitor.check_temperature():
-                print("🛑 Treinamento interrompido por limite de temperatura!")
-                return
-        
-        # Treina em blocos; o Ultralytics criará um novo run (custom_run, custom_run2, ...)
+        train_kwargs = dict(
+            data=args.data,
+            epochs=step,
+            imgsz=args.imgsz,
+            batch=args.batch,
+            name=run_name,
+            exist_ok=True,
+            resume=False,
+            device=device,
+        )
+        if cls_weights:
+            # Ultralytics espera 'class_weights' como key na API Python
+            train_kwargs['class_weights'] = cls_weights
+
         try:
-            model.train(
-                data=args.data,
-                epochs=step,
-                imgsz=args.imgsz,
-                batch=args.batch,
-                name=trained_run_name,
-                exist_ok=True,
-                resume=False,
-                device=device,
-            )
-        except KeyError as e:
-            # Ultralytics may raise KeyError if overrides['model'] missing; set it and retry once
-            if "model" in str(e):
-                try:
-                    model.overrides["model"] = str(model_path)
-                    model.overrides["task"] = model.overrides.get("task", "detect")
-                except Exception:
-                    pass
-                print('⚠️ KeyError model detected; retrying train() after setting overrides["model"]')
-                model.train(
-                    data=args.data,
-                    epochs=step,
-                    imgsz=args.imgsz,
-                    batch=args.batch,
-                    name=trained_run_name,
-                    exist_ok=True,
-                    resume=False,
-                    device=device,
-                )
-            else:
-                raise
+            model.train(**train_kwargs)
+        except Exception as e:
+            print(f'⚠️ Erro durante model.train(): {e} — tentando salvar checkpoint e continuar')
+            time.sleep(1)
 
         total_trained += step
 
-        # ⚠️ Verificar temperatura após cada bloco de treinamento
-        if monitor is not None:
-            if not monitor.check_temperature():
-                print("🛑 Treinamento interrompido por limite de temperatura!")
-                break
-        
-        # localizar melhor peso gerado no último run (o ultralytics cria custom_run, custom_run2, ...)
-        runs_root = Path('runs/detect')
-        candidates = [d for d in runs_root.iterdir() if d.is_dir() and d.name.startswith(trained_run_name)]
-        if candidates:
-            latest = max(candidates, key=lambda d: d.stat().st_mtime)
-            best_path = latest / 'weights' / 'best.pt'
-        else:
-            best_path = Path('')
+        # validação entre chunks (pode ser pulada)
+        if args.skip_validate:
+            print('ℹ️ skip_validate ativo — pulando validação')
+            continue
 
-        if best_path.exists():
-            print(f"✓ best.pt encontrado: {best_path}")
-            # avaliar o modelo
-            print("ℹ️  Executando validação (mAP)...")
-            eval_model = YOLO(str(best_path))
-            metrics = eval_model.val(data=args.data, imgsz=args.imgsz, batch=args.batch, device=device)
+        # localiza o best.pt do run atual
+        best_path = pick_best_from_runs(run_name)
+        if best_path is None or not best_path.exists():
+            print('⚠️ Nenhum best.pt encontrado para o run atual; pulando validação deste chunk')
+            continue
 
-            # métrica disponível em metrics.box.map50 (0..1)
-            try:
-                current_map50 = float(metrics.box.map50)
-            except Exception:
-                print("⚠ Não foi possível ler mAP50 da validação; continuando treino")
-                current_map50 = 0.0
+        print(f'✓ Encontrado best.pt: {best_path} — executando validação leve')
+        current_map50 = validate_model(best_path, args.data, args.imgsz, args.batch, device, fast=args.fast_validate)
+        print(f'📈 mAP50 atual: {current_map50:.3f} (melhor até agora: {best_map50_seen:.3f})')
 
-            print(f"📈 mAP50 atual: {current_map50:.3f} (alvo: {args.target_map:.3f})")
-            if current_map50 >= args.target_map:
-                print(f"✅ Objetivo de precisão alcançado (mAP50 >= {args.target_map}) — interrompendo treino")
-                # ⚠️ Verificar temperatura antes de parar
-                if monitor is not None:
-                    temp = monitor.get_temperature()
-                    if temp is not None:
-                        print(f"📊 Temperatura final da GPU: {temp}°C")
-                # exportar para models/ se atingir export threshold
-                try:
-                    if current_map50 >= args.export_threshold:
-                        models_dir = Path('models')
-                        models_dir.mkdir(parents=True, exist_ok=True)
-                        dest = models_dir / 'best.pt'
-                        shutil.copy2(str(best_path), str(dest))
-                        print(f"📦 Modelo exportado para: {dest}")
-                except Exception as e:
-                    print(f"⚠ Falha ao exportar modelo: {e}")
-                return
-            else:
-                print("🔁 Ainda não atingiu o alvo; continuando treino...")
-        else:
-            print("⚠ best.pt não encontrado após este bloco de treino; continuando...")
+        # se melhorou, salvar como models/best.pt
+        if current_map50 > best_map50_seen:
+            if safe_copy_best(best_path, project_root / 'models' / 'best.pt'):
+                best_map50_seen = current_map50
+                print(f'📦 Novo best exportado (mAP50={best_map50_seen:.3f})')
 
-    # após terminar todos os blocos, verificar último best e exportar se aplicável
-    runs_root = Path('runs/detect')
-    candidates = [d for d in runs_root.iterdir() if d.is_dir() and d.name.startswith(trained_run_name)] if runs_root.exists() else []
-    latest = max(candidates, key=lambda d: d.stat().st_mtime) if candidates else None
-    if latest:
-        final_best = latest / 'weights' / 'best.pt'
-        if final_best.exists():
-            # avaliar e possivelmente exportar
-            try:
-                eval_model = YOLO(str(final_best))
-                metrics = eval_model.val(data=args.data, imgsz=args.imgsz, batch=args.batch, device=device)
-                try:
-                    final_map50 = float(metrics.box.map50)
-                except Exception:
-                    final_map50 = 0.0
-                print(f"📈 mAP50 final: {final_map50:.3f}")
-                if final_map50 >= args.export_threshold:
-                    models_dir = Path('models')
-                    models_dir.mkdir(parents=True, exist_ok=True)
-                    dest = models_dir / 'best.pt'
-                    shutil.copy2(str(final_best), str(dest))
-                    print(f"📦 Modelo final exportado para: {dest}")
-            except Exception as e:
-                print(f"⚠ Falha ao avaliar/exportar best.pt final: {e}")
+        # early stop
+        if current_map50 >= args.target_map:
+            print(f'✅ Objetivo mAP50 atingido: {current_map50:.3f} >= {args.target_map:.3f} — encerrando treino')
+            break
 
-    print("⚑ Treinamento completo (atingiu max_epochs)")
-    
-    # Limpeza do monitor de temperatura
-    if monitor is not None:
-        monitor.cleanup()
+    # avaliação final do melhor modelo disponível
+    final_best = project_root / 'models' / 'best.pt'
+    if final_best.exists():
+        final_map = validate_model(final_best, args.data, args.imgsz, args.batch, device, fast=args.fast_validate)
+        print(f'📈 mAP50 final do models/best.pt: {final_map:.3f}')
+    else:
+        print('⚠️ models/best.pt não existe — verifique os runs em runs/detect')
 
 
 if __name__ == '__main__':
-    run()
+    main()

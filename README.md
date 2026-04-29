@@ -1,3 +1,12 @@
+## COCO original
+
+Se você quiser puxar a base oficial do COCO direto da origem, use estes links:
+
+- Imagens de treino 2017: http://images.cocodataset.org/zips/train2017.zip
+- Imagens de validação 2017: http://images.cocodataset.org/zips/val2017.zip
+- Anotações 2017: http://images.cocodataset.org/annotations/annotations_trainval2017.zip
+
+No projeto, o dataset já convertido fica em [datasets/coco](datasets/coco) e é esse caminho que o treino usa hoje.
 # 🤖 Assistiva IA — Sistema de Visão Assistiva com YOLOv8
 
 > API FastAPI + Model Training para detecção de objetos e geração de orientação para navegação assistida.

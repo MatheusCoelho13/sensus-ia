@@ -1,4 +1,5 @@
 """Limpa dataset: remove imagens corrompidas e gera labels automáticas com YOLOv8."""
+import argparse
 import os
 from pathlib import Path
 from PIL import Image
@@ -81,11 +82,16 @@ def generate_labels(dataset_dir, model_path='yolov8n.pt'):
     print("✓ Labels gerados!")
 
 if __name__ == '__main__':
-    dataset_dir = '../datasets'
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--dataset', default='datasets/coco', help='Diretório raiz do dataset')
+    parser.add_argument('--model', default='yolov8n.pt', help='Modelo usado para auto-label')
+    args = parser.parse_args()
+
+    dataset_dir = args.dataset
     print("Limpando imagens corrompidas...")
     validate_images(dataset_dir)
-    
+
     print("\nGerando labels automáticas...")
-    generate_labels(dataset_dir)
-    
+    generate_labels(dataset_dir, model_path=args.model)
+
     print("\n✅ Dataset pronto para treino!")

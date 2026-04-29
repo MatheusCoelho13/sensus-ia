@@ -2,7 +2,7 @@ make_train:
 	@echo "Buildando e rodando Dockerfile.train para treino automático"
 	@DOCKER_BUILDKIT=1 docker build -f Dockerfile.train -t assistiva-ia-train .
 	@docker run --rm -v $(PWD):/app -w /app assistiva-ia-train
-.PHONY: help setup install prepare start api start_api start_train docker-build docker-run-dev clean clean_dataset distclean
+.PHONY: help setup install prepare start api start_api start_train start_train_local start_tarin_local docker-build docker-run-dev clean clean_dataset distclean
 
 help:
 	@echo "Assistiva IA - comandos úteis:"
@@ -12,6 +12,7 @@ help:
 	@echo "  make start         - executar scripts/launcher.sh (geral)"
 	@echo "  make api           - iniciar API FastAPI local (uvicorn)"
 	@echo "  make start_train   - iniciar treinamento (dentro do Docker)"
+	@echo "  make start_train_local - iniciar treinamento local (venv)"
 	@echo "  make docker-build  - construir imagem Docker"
 	@echo "  make docker-run-dev- executar container dev (shell)"
 	@echo "  make clean_dataset - dry-run da limpeza do dataset (use APPLY=yes para aplicar)"
@@ -19,10 +20,14 @@ help:
 	@echo "  make distclean     - remover runs e models/best.pt"
 
 setup:
-	@if [ -d .venv ]; then \
+	@if [ -f .venv/bin/activate ]; then \
 		echo ".venv já existe — pulando criação"; \
 	else \
-		python3 -m venv .venv && . .venv/bin/activate && pip install -U pip && pip install -r config/requirements.txt; \
+		rm -rf .venv; \
+		python3 -m venv --without-pip .venv; \
+		python3 -c "from urllib.request import urlretrieve; urlretrieve('https://bootstrap.pypa.io/get-pip.py', '.venv/get-pip.py')"; \
+		.venv/bin/python .venv/get-pip.py; \
+		. .venv/bin/activate && python -m pip install -U pip && python -m pip install -r config/requirements.txt; \
 	fi
 
 install:
@@ -51,17 +56,30 @@ start_train:
 	. .venv/bin/activate && python3 scripts/train.py --max-epochs 50 --step 5 --target-map 0.60 --docker
 start_train_local:
 	@echo "Executando treinamento local (venv). Use somente para desenvolvimento rápido."
+	@if [ ! -f .venv/bin/activate ]; then \
+		echo ".venv não encontrado; execute 'make setup' primeiro"; exit 1; \
+	fi; \
 	. .venv/bin/activate && python3 scripts/train.py --max-epochs 50 --step 5 --target-map 0.60
 start_train_local_full:
 	@echo "Executando treinamento local (venv) usando TODO o dataset (train e val, sem step)."
 	. .venv/bin/activate && python3 scripts/train.py --max-epochs 100 --target-map 0.60 --batch 16 --imgsz 640
 
 start_train_gpu:
-	@echo "Executando treinamento local usando GPU (exige CUDA)"
-	@if [ ! -d .venv ]; then \
-		echo ".venv não encontrado; execute 'make setup' primeiro"; exit 1; \
+	@echo "Executando treinamento local usando GPU (exige CUDA) - TODAS as imagens, 150 épocas"
+	@if [ ! -f .venv/bin/activate ]; then \
+		echo ".venv não encontrado ou incompleto; execute 'make setup' primeiro"; exit 1; \
 	fi; \
-	. .venv/bin/activate && python3 scripts/train.py --require-cuda --device cuda:0 --max-epochs 50 --step 5 --target-map 0.60
+	. .venv/bin/activate && python3 scripts/train.py --require-cuda --device cuda:0 --max-epochs 150 --step 150 --target-map 0.60 --batch 16 --imgsz 640
+
+start_train_gpu_balanced:
+	@echo "🎯 Executando treinamento com balanceamento de classes (GPU, até 150 épocas)"
+	@if [ ! -f .venv/bin/activate ]; then \
+		echo ".venv não encontrado ou incompleto; execute 'make setup' primeiro"; exit 1; \
+	fi; \
+	. .venv/bin/activate && python3 scripts/calculate_class_weights.py --data config/data.yaml 2>&1 | tee class_weights.log; \
+	WEIGHTS=$$(. .venv/bin/activate && python3 -c "import yaml; data=yaml.safe_load(open('config/class_weights.yaml')); print(','.join(str(data['class_weights'][i]) for i in range(10)))"); \
+	echo "📊 Pesos calculados: $$WEIGHTS"; \
+	. .venv/bin/activate && python3 scripts/train.py --require-cuda --device cuda:0 --max-epochs 150 --step 150 --target-map 0.60 --batch 16 --imgsz 640 --cls-weight "$$WEIGHTS" 2>&1 | tee training_balanced.log
 
 show_runs:
 	@. .venv/bin/activate && python3 scripts/show_runs.py --data config/data.yaml --device cpu
@@ -148,4 +166,7 @@ convert_coco: scripts/convert_coco_to_yolo
 prepare_dataset: scripts/prepare_dataset
 clean_and_fix_dataset: scripts/clean_and_fix_dataset
 run_script: scripts-run
+
+# Compatibilidade com erro de digitação comum.
+start_tarin_local: start_train_local
 

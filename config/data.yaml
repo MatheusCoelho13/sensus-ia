@@ -1,4 +1,4 @@
-path: ../datasets/coco
+path: /home/idealab/Área de trabalho/Matheus_coelho/Oficina_web/sensus-ia/datasets/coco
 train: images/train
 val: images/val
 

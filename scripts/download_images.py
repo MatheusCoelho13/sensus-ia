@@ -13,9 +13,29 @@ import mimetypes
 import time
 
 
+DEFAULT_BROWSER_UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+
+
+def build_headers(url, contact=''):
+    if contact:
+        user_agent = f'assistiva-ia/1.0 (mailto:{contact}); {DEFAULT_BROWSER_UA}'
+    else:
+        user_agent = DEFAULT_BROWSER_UA
+
+    headers = {
+        'User-Agent': user_agent,
+        'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+    }
+
+    if 'wikimedia.org' in url:
+        headers['Referer'] = 'https://commons.wikimedia.org/'
+
+    return headers
+
+
 def download(url, dest, headers=None):
     if headers is None:
-        headers = {'User-Agent': 'assistiva-ia/1.0'}
+        headers = build_headers(url)
     try:
         with requests.get(url, headers=headers, timeout=20, stream=True) as r:
             r.raise_for_status()
@@ -53,7 +73,11 @@ def download_with_retries(url, dest, headers=None, max_retries=3):
     attempt = 0
     cur_url = url
     while attempt < max_retries:
-        ok, saved, err = download(cur_url, dest, headers=headers)
+        if headers is None:
+            current_headers = build_headers(cur_url)
+        else:
+            current_headers = headers
+        ok, saved, err = download(cur_url, dest, headers=current_headers)
         if ok:
             return True, saved, None
         # on 429 or HTTP 5xx, retry with backoff; if Wikimedia, try thumb url
@@ -95,7 +119,7 @@ def main():
         user_agent = f"assistiva-ia/1.0 (mailto:{contact})"
     else:
         user_agent = "assistiva-ia/1.0"
-    headers = {'User-Agent': user_agent}
+    headers = {'User-Agent': user_agent, 'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'}
 
     urls = [l.strip() for l in open(args.urls_file, 'r', encoding='utf-8') if l.strip()]
     urls = urls[:args.max]
@@ -175,7 +199,7 @@ def main():
 
         # polite delay to avoid rate limits
         delay = args.delay
-        if 'upload.wikimedia.org' in url:
+        if 'wikimedia.org' in url:
             delay = max(delay, args.wikimedia_delay)
         time.sleep(delay)
 
