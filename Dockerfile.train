@@ -1,0 +1,30 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        curl \
+        git \
+        ffmpeg \
+        libgl1 \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY config/requirements.txt /tmp/requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -U pip && pip install -r /tmp/requirements.txt --no-cache-dir
+
+COPY app.py /app/
+COPY config/ /app/config/
+COPY scripts/ /app/scripts/
+RUN mkdir -p /app/models /app/runs /app/datasets
+
+# Por padrão, inicia o treino (pode sobrescrever CMD)
+CMD ["python3", "scripts/train.py", "--max-epochs", "50", "--step", "5", "--target-map", "0.60"]

@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+opencv-python
+numpy
+ultralytics
+httpx
+requests
+python-multipart
+pyttsx3
+Pillow
+pyyaml
+pycocotools
+tqdm
+nvidia-ml-py

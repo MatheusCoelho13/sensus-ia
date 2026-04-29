@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pkl
+*.h5
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Logs
+logs/
+*.log
+
+# Training runs (manter apenas o melhor modelo treinado)
+runs/
+!runs/detect/custom_run/
+!runs/detect/custom_run/weights/
+!runs/detect/custom_run/weights/best.pt
+
+# Dataset COCO128 padrão (re-baixável)
+data/coco128/
+data/coco128.zip
+
+# Outputs temporários
+output/
+
+# IDE
+.DS_Store
+.idea/
+*.swp
+
+# Docker
+*.tar
+*.gz
+tmp/
