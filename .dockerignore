@@ -1,0 +1,18 @@
+datasets/
+# Exclui runs mas mantém o melhor modelo treinado para o build de produção
+runs/
+!runs/detect/custom_run/weights/best.pt
+.venv/
+venv/
+logs/
+data/
+.git/
+__pycache__/
+*.pyc
+*.pkl
+*.h5
+node_modules/
+*.tar
+*.gz
+tmp/
+.DS_Store

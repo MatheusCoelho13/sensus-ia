@@ -1,0 +1,21 @@
+path: /home/idealab/Área de trabalho/Matheus_coelho/Oficina_web/sensus-ia/datasets/coco
+train: images/train
+val: images/val
+
+# número de classes
+nc: 10
+
+# nomes das classes na ordem (inglês — devem corresponder aos nomes do COCO filtrado)
+names:
+  [
+    'person',
+    'backpack',
+    'chair',
+    'bench',
+    'laptop',
+    'cell phone',
+    'bottle',
+    'book',
+    'cup',
+    'tv',
+  ]

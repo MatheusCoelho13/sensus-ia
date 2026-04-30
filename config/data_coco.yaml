@@ -1,0 +1,10 @@
+path: datasets/coco
+train: images/train
+val: images/val
+nc: 5
+names:
+  - person
+  - backpack
+  - chair
+  - bench
+  - laptop

@@ -1,0 +1,26 @@
+# Dataset customizado com anotações automáticas (requer auto_annotate.sh primeiro)
+# Estrutura esperada:
+#   datasets/
+#   ├── images/
+#   │   ├── train/ (imagens por classe)
+#   │   └── val/   (imagens por classe)
+#   └── labels/
+#       ├── train/ (anotações por classe)
+#       └── val/   (anotações por classe)
+
+path: ..
+train: datasets/images/train:datasets/labels/train
+val: datasets/images/val:datasets/labels/val
+
+# Split ratio (se usar imagens sem labels)
+val_split: 0.2
+
+# número de classes
+nc: 5
+
+# nomes das classes
+names: ['person', 'backpack', 'chair', 'bench', 'laptop']
+
+# workers para carregamento de dados
+workers: 0  # Reduzido para GTX 1650
+

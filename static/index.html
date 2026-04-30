@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Teste de Câmera - Oficina</title>
+  <style>
+    body{font-family: Arial, Helvetica, sans-serif; padding:16px}
+    video{width:480px; height:auto; background:#000}
+    #orientacao{font-size:18px; margin-top:12px}
+    pre{background:#f6f8fa;padding:12px;border-radius:6px;max-width:720px;overflow:auto}
+    button{margin-top:8px;padding:8px 12px}
+  </style>
+</head>
+<body>
+  <h2>Teste de Câmera</h2>
+  <div style="margin-bottom:12px">
+    <strong>Modelo atual:</strong> <span id="model-path">carregando...</span>
+    <div style="margin-top:8px">
+      <input id="model-input" placeholder="caminho do modelo (ex: models/yolov8n.pt)" style="width:420px" />
+      <button id="set-model">Carregar modelo</button>
+    </div>
+  </div>
+  <p>Permita o acesso à webcam e clique em <b>Enviar snapshot</b> para enviar ao endpoint `/analisar`.</p>
+  <video id="video" autoplay playsinline></video>
+  <canvas id="overlay" style="position:relative;left:-480px;margin-top:-360px; pointer-events:none "></canvas>
+  <div>
+    <button id="snap">Enviar snapshot</button>
+    <button id="stop">Parar câmera</button>
+    <label style="margin-left:12px">Stream:</label>
+    <input id="stream-toggle" type="checkbox" />
+    <label style="margin-left:6px">Intervalo (ms):</label>
+    <input id="stream-interval" type="number" value="1000" style="width:80px" />
+  </div>
+  <div id="orientacao">Orientação: <span id="orient-text">—</span></div>
+  <div style="margin-top:8px">
+    <label>Threshold proximidade: <span id="threshold-val">25%</span></label>
+    <input id="threshold" type="range" min="5" max="60" value="25" />
+  </div>
+  <h3>Resposta completa</h3>
+  <pre id="response">—</pre>
+
+  <canvas id="canvas" style="display:none"></canvas>
+
+  <script>
+    const video = document.getElementById('video');
+    const snapBtn = document.getElementById('snap');
+    const stopBtn = document.getElementById('stop');
+    const orientText = document.getElementById('orient-text');
+    const responsePre = document.getElementById('response');
+    const canvas = document.getElementById('canvas');
+    let stream = null;
+
+    async function startCamera(){
+      try{
+        stream = await navigator.mediaDevices.getUserMedia({video: true, audio: false});
+        video.srcObject = stream;
+      }catch(err){
+        alert('Erro ao acessar câmera: ' + err.message);
+      }
+    }
+
+    async function fetchModel(){
+      try{
+        const r = await fetch('/model');
+        const j = await r.json();
+        document.getElementById('model-path').textContent = j.model_path || '(não carregado)';
+      }catch(e){
+        document.getElementById('model-path').textContent = 'erro';
+      }
+    }
+
+    async function setModel(){
+      const path = document.getElementById('model-input').value.trim();
+      if(!path) return alert('Informe o caminho do modelo');
+      try{
+        const r = await fetch('/model', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({path})});
+        if(!r.ok) throw await r.text();
+        const j = await r.json();
+        document.getElementById('model-path').textContent = j.model_path;
+        alert('Modelo carregado: ' + j.model_path);
+      }catch(e){
+        alert('Erro ao carregar modelo: ' + e);
+      }
+    }
+
+    function stopCamera(){
+      if(!stream) return;
+      stream.getTracks().forEach(t => t.stop());
+      video.srcObject = null;
+      stream = null;
+    }
+
+    async function sendSnapshot(){
+      if(!stream){ alert('Câmera não iniciada'); return; }
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, w, h);
+      const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.9));
+
+      const form = new FormData();
+      form.append('file', blob, 'snapshot.jpg');
+
+      try{
+        const r = await fetch('/analisar', {method: 'POST', body: form});
+        const json = await r.json();
+        orientText.textContent = json.orientacao || '—';
+        responsePre.textContent = JSON.stringify(json, null, 2);
+        drawBoxes(json.objetos_detectados || []);
+      }catch(err){
+        alert('Erro na requisição: ' + err.message);
+      }
+    }
+
+    function resizeOverlay(){
+      const overlay = document.getElementById('overlay');
+      overlay.width = video.clientWidth;
+      overlay.height = video.clientHeight;
+      overlay.style.marginTop = `-${video.clientHeight}px`;
+    }
+
+    function drawBoxes(objs){
+      const overlay = document.getElementById('overlay');
+      const ctx = overlay.getContext('2d');
+      // clear
+      ctx.clearRect(0,0,overlay.width,overlay.height);
+      if(!objs || objs.length===0) return;
+      const scaleX = overlay.width / video.videoWidth || 1;
+      const scaleY = overlay.height / video.videoHeight || 1;
+      ctx.lineWidth = 2;
+      ctx.font = '14px Arial';
+      objs.forEach(o => {
+        if(!o.bbox) return;
+        const [x1,y1,x2,y2] = o.bbox;
+        const x = x1 * scaleX;
+        const y = y1 * scaleY;
+        const w = (x2 - x1) * scaleX;
+        const h = (y2 - y1) * scaleY;
+        ctx.strokeStyle = 'lime';
+        ctx.fillStyle = 'lime';
+        ctx.strokeRect(x,y,w,h);
+          // compute proximity client-side using height_ratio and adjustable threshold
+          const thr = (parseInt(document.getElementById('threshold').value || '25', 10) / 100.0);
+          const proximityLabel = (o.height_ratio && o.height_ratio > thr) ? ' próximo' : ' distante';
+          const heightPct = o.height_ratio ? (' ' + Math.round(o.height_ratio * 100) + '%') : '';
+        const confLabel = o.confidence ? (' ' + (o.confidence.toFixed ? o.confidence.toFixed(2) : o.confidence)) : '';
+        const label = o.nome + proximityLabel + heightPct + confLabel;
+        const textW = ctx.measureText(label).width + 6;
+        const textH = 18;
+        ctx.fillRect(x, Math.max(0,y-textH), textW, textH);
+        ctx.fillStyle = 'black';
+        ctx.fillText(label, x+3, Math.max(12, y-4));
+        ctx.fillStyle = 'lime';
+      });
+    }
+
+    // streaming
+    let streamTimer = null;
+    function startStreaming(){
+      const interval = parseInt(document.getElementById('stream-interval').value || '1000', 10);
+      if(streamTimer) clearInterval(streamTimer);
+      streamTimer = setInterval(() => {
+        sendSnapshot();
+      }, Math.max(200, interval));
+    }
+    function stopStreaming(){
+      if(streamTimer) { clearInterval(streamTimer); streamTimer = null; }
+    }
+
+    document.getElementById('stream-toggle').addEventListener('change', (ev)=>{
+      if(ev.target.checked){ startStreaming(); } else { stopStreaming(); }
+    });
+    // update threshold display
+    const thrEl = document.getElementById('threshold');
+    const thrVal = document.getElementById('threshold-val');
+    thrEl.addEventListener('input', ()=>{ thrVal.textContent = thrEl.value + '%'; });
+
+    snapBtn.addEventListener('click', sendSnapshot);
+    stopBtn.addEventListener('click', stopCamera);
+    document.getElementById('set-model').addEventListener('click', setModel);
+
+    // iniciar automaticamente
+    startCamera();
+    fetchModel();
+    // adjust overlay when video metadata available or on resize
+    video.addEventListener('loadedmetadata', resizeOverlay);
+    window.addEventListener('resize', resizeOverlay);
+  </script>
+</body>
+</html>
