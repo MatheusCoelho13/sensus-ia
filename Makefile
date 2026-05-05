@@ -53,7 +53,7 @@ install_train_docker:
 	@docker run --rm -v $(PWD):/app -w /app -e IN_DOCKER=1 assistiva-ia bash -c "bash scripts/launcher.sh"
 start_train:
 	@echo "Executando treinamento com docker (venv). Use  quando tem  computador potente."
-	. .venv/bin/activate && python3 scripts/train.py --max-epochs 50 --step 5 --target-map 0.60 --docker
+	. .venv/bin/activate && python3 scripts/train.py --max-epochs 80 --step 100 --target-map 1.20 --require-cuda 
 start_train_local:
 	@echo "Executando treinamento local (venv). Use somente para desenvolvimento rápido."
 	@if [ ! -f .venv/bin/activate ]; then \

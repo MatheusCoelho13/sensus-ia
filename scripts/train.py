@@ -19,6 +19,14 @@ import time
 from pathlib import Path
 import yaml
 import shutil
+import csv
+import json
+from typing import List, Dict
+
+try:
+    import matplotlib.pyplot as plt
+except Exception:
+    plt = None
 
 try:
     import torch
@@ -204,6 +212,7 @@ def main():
     run_name = args.run_name
     total_trained = 0
     best_map50_seen = baseline_map50
+    epoch_records: List[Dict] = []
 
     # parse class weights if provided
     cls_weights = None
@@ -254,6 +263,75 @@ def main():
         if args.skip_validate:
             print('ℹ️ skip_validate ativo — pulando validação')
             continue
+
+        # localizar diretório do run atual e ler results.csv para obter métricas por época
+        run_dir = Path('runs') / 'detect' / run_name
+        def read_results_csv(run_dir: Path) -> List[Dict]:
+            results_path = run_dir / 'results.csv'
+            if not results_path.exists():
+                return []
+            rows: List[Dict] = []
+            try:
+                with results_path.open('r', encoding='utf-8', errors='ignore') as fh:
+                    reader = csv.DictReader(fh)
+                    for r in reader:
+                        out = {}
+                        for k, v in r.items():
+                            if v is None or v == '':
+                                out[k] = None
+                                continue
+                            try:
+                                if k == 'epoch':
+                                    out[k] = int(float(v))
+                                else:
+                                    out[k] = float(v)
+                            except Exception:
+                                out[k] = v
+                        rows.append(out)
+            except Exception as e:
+                print(f'⚠️ Erro lendo results.csv: {e}')
+            return rows
+
+        new_rows = read_results_csv(run_dir)
+        last_epoch_seen = epoch_records[-1]['epoch'] if epoch_records else 0
+        for ep in new_rows:
+            if ep.get('epoch', 0) > last_epoch_seen:
+                prec = ep.get('metrics/precision(B)')
+                map50 = ep.get('metrics/mAP50(B)')
+                if prec is not None:
+                    print(f'📊 Época {ep["epoch"]}: precision={prec:.3f} mAP50={map50:.3f}')
+                epoch_records.append(ep)
+
+        # salvar registros acumulados em JSON (útil para inspeção externa)
+        try:
+            if epoch_records:
+                run_dir.mkdir(parents=True, exist_ok=True)
+                with (run_dir / 'epoch_metrics.json').open('w', encoding='utf-8') as fh:
+                    json.dump(epoch_records, fh, indent=2)
+        except Exception as e:
+            print(f'⚠️ Falha ao salvar epoch_metrics.json: {e}')
+
+        # gerar gráfico das métricas até agora (se matplotlib estiver disponível)
+        try:
+            if plt is not None and epoch_records:
+                xs = [e['epoch'] for e in epoch_records if e.get('epoch') is not None]
+                ys_prec = [e.get('metrics/precision(B)', 0.0) for e in epoch_records]
+                ys_map50 = [e.get('metrics/mAP50(B)', 0.0) for e in epoch_records]
+                plt.figure(figsize=(8,4))
+                plt.plot(xs, ys_prec, label='precision', marker='o')
+                plt.plot(xs, ys_map50, label='mAP50', marker='x')
+                plt.xlabel('época')
+                plt.ylabel('valor')
+                plt.title('Precision e mAP50 por época')
+                plt.grid(True)
+                plt.legend()
+                out_png = run_dir / 'epoch_metrics.png'
+                plt.tight_layout()
+                plt.savefig(out_png)
+                plt.close()
+                print(f'📈 Gráfico salvo em: {out_png}')
+        except Exception as e:
+            print(f'⚠️ Falha ao gerar gráfico: {e}')
 
         # localiza o best.pt do run atual
         best_path = pick_best_from_runs(run_name)
