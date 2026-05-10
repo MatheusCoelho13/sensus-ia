@@ -2,7 +2,7 @@
 # Smart launcher: tenta Docker, fallback para Python local
 
 set -e
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 echo "=========================================="
 echo "🚀 ASSISTIVA IA - AUTO LAUNCHER"
@@ -81,4 +81,4 @@ echo "⚠ Docker não disponível ou desabilitado"
 echo "✓ Usando Python local..."
 echo ""
 
-bash scripts/full_pipeline.sh
+bash scripts/sh/full_pipeline.sh

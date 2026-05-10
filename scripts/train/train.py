@@ -33,13 +33,13 @@ DEFAULT_RUN_NAME = 'train_iter'
 
 def parse_args():
     p = argparse.ArgumentParser(description='Treinar iterativamente com early-stop por mAP50')
-    p.add_argument('--max-epochs', type=int, default=150)
+    p.add_argument('--max-epochs', type=int, default=200)
     p.add_argument('--step', type=int, default=5, help='épocas por chunk antes de validar')
     p.add_argument('--target-map', type=float, default=0.60)
     p.add_argument('--export-threshold', type=float, default=0.50)
     p.add_argument('--data', default='config/data.yaml')
-    p.add_argument('--model', default='models/yolov8n.pt') # // testar com o modelo pré-treinado seq.pt, que tem melhor capacidade de generalização ou o modelo mais leve yolov8n.pt ou o mais  o seq
-    p.add_argument('--imgsz', type=int, default=640)
+    p.add_argument('--model', default='yolov8s.pt')
+    p.add_argument('--imgsz', type=int, default=768)
     p.add_argument('--batch', type=int, default=16)
     p.add_argument('--device', default='auto')
     p.add_argument('--require-cuda', action='store_true')

@@ -5,7 +5,7 @@
 # - instala PyTorch compatível com CUDA e as dependências do projeto
 # Uso: bash scripts/setup_gpu.sh
 set -euo pipefail
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 echo "== Setup GPU para Assistiva IA =="
